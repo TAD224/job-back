@@ -1,21 +1,36 @@
 package com.odc.plateforme_emploi.service;
 
-import jakarta.mail.MessagingException;
-import jakarta.mail.internet.MimeMessage;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.mail.MailException;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
 
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Envoi d'e-mails transactionnels via l'API HTTP de Brevo (https://api.brevo.com/v3/smtp/email)
+ * plutôt que via SMTP classique.
+ *
+ * Pourquoi : les hébergeurs cloud (Render inclus, sur son offre gratuite) bloquent le trafic
+ * sortant sur les ports SMTP (25, 465, 587) pour lutter contre le spam. L'API HTTP de Brevo
+ * passe par le port 443 (HTTPS), jamais bloqué, ce qui rend l'envoi de mails fiable même sur
+ * les plans gratuits.
+ *
+ * ⚠️ Nécessite une clé API Brevo v3 (Paramètres → SMTP & API → Clés API et MCP → Générer une
+ * nouvelle clé API), différente de la clé SMTP utilisée précédemment.
+ */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class EmailService {
 
-    private final JavaMailSender mailSender;
+    private static final String BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
+
+    private final RestTemplate restTemplate = new RestTemplate();
 
     @Value("${app.frontend.url}")
     private String frontendUrl;
@@ -25,6 +40,9 @@ public class EmailService {
 
     @Value("${app.mail.from-name}")
     private String fromName;
+
+    @Value("${app.mail.brevo.api-key}")
+    private String brevoApiKey;
 
     public void envoyerEmailActivation(String destinataire, String prenom, String token) {
         String lienActivation = frontendUrl + "/activation?token=" + token;
@@ -64,18 +82,24 @@ public class EmailService {
     }
 
     private void envoyer(String destinataire, String sujet, String contenuHtml) {
-        try {
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
-            helper.setTo(destinataire);
-            helper.setSubject(sujet);
-            helper.setText(contenuHtml, true);
-            helper.setFrom(fromAddress, fromName);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("api-key", brevoApiKey);
+        headers.set("accept", "application/json");
 
-            mailSender.send(message);
+        Map<String, Object> corps = Map.of(
+            "sender", Map.of("name", fromName, "email", fromAddress),
+            "to", List.of(Map.of("email", destinataire)),
+            "subject", sujet,
+            "htmlContent", contenuHtml
+        );
+
+        try {
+            HttpEntity<Map<String, Object>> requete = new HttpEntity<>(corps, headers);
+            restTemplate.postForEntity(BREVO_API_URL, requete, String.class);
             log.info("E-mail envoyé à {} : {}", destinataire, sujet);
-        } catch (MessagingException | MailException | java.io.UnsupportedEncodingException e) {
-            log.error("Échec de l'envoi de l'e-mail à {}", destinataire, e);
+        } catch (RestClientException e) {
+            log.error("Échec de l'envoi de l'e-mail à {} via l'API Brevo", destinataire, e);
             throw new RuntimeException("Impossible d'envoyer l'e-mail. Merci de réessayer plus tard.");
         }
     }
